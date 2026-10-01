@@ -1,0 +1,13 @@
+.vs/
+build/
+build-*/
+cmake-build-*/
+.vscode/
+.github/
+assets/
+include/
+lib/
+imgui.ini
+*.user
+*.suo
+edited_cube.obj
