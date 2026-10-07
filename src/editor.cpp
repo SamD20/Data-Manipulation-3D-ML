@@ -1,8 +1,7 @@
 #include "editor.h"
-
 #include "app_state.h"
 #include "file_io.h"
-
+#include "depth_extractor.h"
 #include <imgui.h>
 
 #include <algorithm>
@@ -155,6 +154,20 @@ void drawEditorPanel(AppState& state) {
                 }
                 ImGui::SetItemTooltip("Set the TIFF layer's full dimensions in voxel units.");
                 ImGui::Text("Pixels: %u x %u", image.pixelWidth, image.pixelHeight);
+
+                ImGui::Separator();
+
+                static float scaleFactor = 1.0f;
+
+                if (ImGui::Button("Depth Transform")) {
+                    extractDepth(image, scaleFactor);
+                }
+
+                ImGui::SameLine();
+
+                ImGui::SetNextItemWidth(60.0f);
+                ImGui::InputFloat("(Scale Factor)", &scaleFactor);
+
                 if (changed) commitHistory(state, "Transform TIFF layer");
             } else if (state.selectedDataPoint >= 0 && state.selectedDataPoint < static_cast<int>(state.dataPoints.size())) {
                 DataPoint& point = state.dataPoints[state.selectedDataPoint];
@@ -197,6 +210,7 @@ void drawEditorPanel(AppState& state) {
                     state.selectedDataPoint = -1;
                     commitHistory(state, "Delete Data Point");
                 }
+
             } else {
                 ImGui::TextUnformatted("Select a layer in Layers to transform it.");
             }
