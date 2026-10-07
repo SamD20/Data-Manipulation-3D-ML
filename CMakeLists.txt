@@ -89,6 +89,7 @@ add_executable(opengl_data_app
     src/editor.cpp
     src/file_io.cpp
     src/renderer.cpp
+    src/depth_extractor.cpp
 )
 
 target_compile_definitions(opengl_data_app PRIVATE

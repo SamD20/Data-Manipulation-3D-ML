@@ -15,6 +15,70 @@
 namespace app {
 namespace {
 
+constexpr float depthMapMaxHeight = 1.0f;
+
+struct DepthRenderScale
+{
+    float minDepth = 0.0f;
+    float maxDepth = 0.0f;
+    float yScale = 0.0f;
+    bool valid = false;
+};
+
+DepthRenderScale calculateDepthRenderScale(const AppState& state)
+{
+    DepthRenderScale result;
+
+    bool foundDepth = false;
+
+    for (std::size_t layerIndex = 0;
+         layerIndex < state.activeImageCount;
+         ++layerIndex)
+    {
+        const ImageLayer& image = state.imageLayers[layerIndex];
+
+        if (!image.hasDepthMap)
+            continue;
+
+        for (float value : image.depthMap.values)
+        {
+            if (!std::isfinite(value))
+                continue;
+
+            if (!foundDepth)
+            {
+                result.minDepth = value;
+                result.maxDepth = value;
+                foundDepth = true;
+            }
+            else
+            {
+                result.minDepth =
+                    std::min(result.minDepth, value);
+
+                result.maxDepth =
+                    std::max(result.maxDepth, value);
+            }
+        }
+    }
+
+    if (!foundDepth)
+        return result;
+
+    result.valid = true;
+
+    const float depthRange =
+        result.maxDepth - result.minDepth;
+
+    if (depthRange > 0.0f)
+    {
+        result.yScale =
+            depthMapMaxHeight / depthRange;
+    }
+
+    return result;
+}
+
 void drawDataPoint() {
     constexpr float vertices[8][3] = {
         {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
@@ -92,31 +156,388 @@ void drawInfiniteGrid(const AppState& state) {
     glPopAttrib();
 }
 
-void drawImageLayers(const AppState& state) {
-    glPushAttrib(GL_ENABLE_BIT | GL_TEXTURE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT);
+void drawDepthImage(const ImageLayer& image, const DepthRenderScale& scale)
+{
+    const DepthMap& depth = image.depthMap;
+
+    if (depth.width <= 0 ||
+        depth.height <= 0 ||
+        depth.values.empty())
+    {
+        return;
+    }
+
+    const float width =
+        image.sizeX * voxelSpacingWorldUnits;
+
+    const float depthSize =
+        image.sizeZ * voxelSpacingWorldUnits;
+
+    const float xSpacing =
+        width /
+        static_cast<float>(std::max(1, depth.width - 1));
+
+    const float zSpacing =
+        depthSize /
+        static_cast<float>(std::max(1, depth.height - 1));
+
+    const float depthRange =
+        scale.maxDepth - scale.minDepth;
+
+    const float yScale =
+        std::max(1.0f, image.sizeY);
+
+    glPushAttrib(
+        GL_ENABLE_BIT |
+        GL_TEXTURE_BIT |
+        GL_CURRENT_BIT |
+        GL_COLOR_BUFFER_BIT
+    );
+
     glDisable(GL_LIGHTING);
     glDisable(GL_CULL_FACE);
     glEnable(GL_TEXTURE_2D);
     glEnable(GL_BLEND);
+
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glBindTexture(GL_TEXTURE_2D, image.texture);
+
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-    for (std::size_t index = 0; index < state.activeImageCount; ++index) {
-        const ImageLayer& image = state.imageLayers[index];
-        if (!image.visible) continue;
-        const float halfWidth = image.sizeX * voxelSpacingWorldUnits * 0.5f;
-        const float halfDepth = image.sizeZ * voxelSpacingWorldUnits * 0.5f;
-        glBindTexture(GL_TEXTURE_2D, image.texture);
-        const int ySizeVoxels = static_cast<int>(std::max(1.0f, std::round(image.sizeY)));
-        for (int yVoxel = 0; yVoxel < ySizeVoxels; ++yVoxel) {
-            const float layerY = image.y + static_cast<float>(yVoxel) * voxelSpacingWorldUnits;
-            glBegin(GL_QUADS);
-            glTexCoord2f(0.0f, 0.0f); glVertex3f(image.x - halfWidth, layerY, image.z - halfDepth);
-            glTexCoord2f(1.0f, 0.0f); glVertex3f(image.x + halfWidth, layerY, image.z - halfDepth);
-            glTexCoord2f(1.0f, 1.0f); glVertex3f(image.x + halfWidth, layerY, image.z + halfDepth);
-            glTexCoord2f(0.0f, 1.0f); glVertex3f(image.x - halfWidth, layerY, image.z + halfDepth);
+
+    for (int z = 0; z < depth.height - 1; ++z)
+    {
+        for (int x = 0; x < depth.width - 1; ++x)
+        {
+            const int i00 =
+                z * depth.width + x;
+
+            const int i10 =
+                i00 + 1;
+
+            const int i01 =
+                (z + 1) * depth.width + x;
+
+            const int i11 =
+                i01 + 1;
+
+            const float x0 =
+                image.x +
+                (static_cast<float>(x) -
+                 static_cast<float>(depth.width - 1) * 0.5f) *
+                xSpacing;
+
+            const float x1 =
+                image.x +
+                (static_cast<float>(x + 1) -
+                 static_cast<float>(depth.width - 1) * 0.5f) *
+                xSpacing;
+
+            const float z0 =
+                image.z +
+                (static_cast<float>(z) -
+                 static_cast<float>(depth.height - 1) * 0.5f) *
+                zSpacing;
+
+            const float z1 =
+                image.z +
+                (static_cast<float>(z + 1) -
+                 static_cast<float>(depth.height - 1) * 0.5f) *
+                zSpacing;
+
+            float d00 = 0.0f;
+            float d10 = 0.0f;
+            float d01 = 0.0f;
+            float d11 = 0.0f;
+
+            if (depthRange > 0.0f)
+            {
+                d00 =
+                    (depth.values[i00] - scale.minDepth) /
+                    depthRange;
+
+                d10 =
+                    (depth.values[i10] - scale.minDepth) /
+                    depthRange;
+
+                d01 =
+                    (depth.values[i01] - scale.minDepth) /
+                    depthRange;
+
+                d11 =
+                    (depth.values[i11] - scale.minDepth) /
+                    depthRange;
+            }
+
+            d00 = std::clamp(d00, 0.0f, 1.0f);
+            d10 = std::clamp(d10, 0.0f, 1.0f);
+            d01 = std::clamp(d01, 0.0f, 1.0f);
+            d11 = std::clamp(d11, 0.0f, 1.0f);
+
+            const float y00 =
+                image.y +
+                d00 *
+                depthMapMaxHeight *
+                yScale;
+
+            const float y10 =
+                image.y +
+                d10 *
+                depthMapMaxHeight *
+                yScale;
+
+            const float y01 =
+                image.y +
+                d01 *
+                depthMapMaxHeight *
+                yScale;
+
+            const float y11 =
+                image.y +
+                d11 *
+                depthMapMaxHeight *
+                yScale;
+
+            const float u0 =
+                static_cast<float>(x) /
+                static_cast<float>(depth.width - 1);
+
+            const float u1 =
+                static_cast<float>(x + 1) /
+                static_cast<float>(depth.width - 1);
+
+            const float v0 =
+                static_cast<float>(z) /
+                static_cast<float>(depth.height - 1);
+
+            const float v1 =
+                static_cast<float>(z + 1) /
+                static_cast<float>(depth.height - 1);
+
+            glBegin(GL_TRIANGLES);
+
+            glTexCoord2f(u0, v0);
+            glVertex3f(x0, y00, z0);
+
+            glTexCoord2f(u1, v0);
+            glVertex3f(x1, y10, z0);
+
+            glTexCoord2f(u1, v1);
+            glVertex3f(x1, y11, z1);
+
+            glTexCoord2f(u0, v0);
+            glVertex3f(x0, y00, z0);
+
+            glTexCoord2f(u1, v1);
+            glVertex3f(x1, y11, z1);
+
+            glTexCoord2f(u0, v1);
+            glVertex3f(x0, y01, z1);
+
             glEnd();
         }
     }
+
+    glPopAttrib();
+}
+
+void drawImageLayers(const AppState& state)
+{
+    const DepthRenderScale depthScale =
+        calculateDepthRenderScale(state);
+
+    glPushAttrib(
+        GL_ENABLE_BIT |
+        GL_TEXTURE_BIT |
+        GL_CURRENT_BIT |
+        GL_COLOR_BUFFER_BIT
+    );
+
+    glDisable(GL_LIGHTING);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+
+    glBlendFunc(
+        GL_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA
+    );
+
+    for (std::size_t index = 0;
+         index < state.activeImageCount;
+         ++index)
+    {
+        const ImageLayer& image =
+            state.imageLayers[index];
+
+        if (!image.visible)
+            continue;
+
+        if (image.hasDepthMap && depthScale.valid)
+        {
+            drawDepthImage(
+                image,
+                depthScale
+            );
+
+            continue;
+        }
+
+        if (image.pixelWidth == 0 ||
+            image.pixelHeight == 0 ||
+            image.rgbaPixels.empty())
+        {
+            continue;
+        }
+
+        const float voxelSize =
+            voxelSpacingWorldUnits;
+
+        const int ySizeVoxels =
+            static_cast<int>(
+                std::max(
+                    1.0f,
+                    std::round(image.sizeY)
+                )
+            );
+
+        const float startX =
+            image.x -
+            static_cast<float>(image.pixelWidth) *
+            voxelSize * 0.5f;
+
+        const float startZ =
+            image.z -
+            static_cast<float>(image.pixelHeight) *
+            voxelSize * 0.5f;
+
+        glBegin(GL_QUADS);
+
+        for (std::uint32_t z = 0;
+             z < image.pixelHeight;
+             ++z)
+        {
+            for (std::uint32_t x = 0;
+                 x < image.pixelWidth;
+                 ++x)
+            {
+                const std::size_t pixelIndex =
+                    (
+                        static_cast<std::size_t>(z) *
+                        image.pixelWidth +
+                        x
+                    ) * 4;
+
+                if (pixelIndex + 3 >=
+                    image.rgbaPixels.size())
+                {
+                    continue;
+                }
+
+                const float r =
+                    static_cast<float>(
+                        image.rgbaPixels[pixelIndex]
+                    ) / 255.0f;
+
+                const float g =
+                    static_cast<float>(
+                        image.rgbaPixels[pixelIndex + 1]
+                    ) / 255.0f;
+
+                const float b =
+                    static_cast<float>(
+                        image.rgbaPixels[pixelIndex + 2]
+                    ) / 255.0f;
+
+                const float a =
+                    static_cast<float>(
+                        image.rgbaPixels[pixelIndex + 3]
+                    ) / 255.0f;
+
+                glColor4f(r, g, b, a);
+
+                const float minX =
+                    startX +
+                    static_cast<float>(x) *
+                    voxelSize;
+
+                const float maxX =
+                    minX + voxelSize;
+
+                const float minZ =
+                    startZ +
+                    static_cast<float>(z) *
+                    voxelSize;
+
+                const float maxZ =
+                    minZ + voxelSize;
+
+                for (int yVoxel = 0;
+                     yVoxel < ySizeVoxels;
+                     ++yVoxel)
+                {
+                    const float minY =
+                        image.y +
+                        static_cast<float>(yVoxel) *
+                        voxelSize;
+
+                    const float maxY =
+                        minY + voxelSize;
+
+                    if (yVoxel == 0)
+                    {
+                        glVertex3f(minX, minY, minZ);
+                        glVertex3f(maxX, minY, minZ);
+                        glVertex3f(maxX, minY, maxZ);
+                        glVertex3f(minX, minY, maxZ);
+                    }
+
+                    if (yVoxel == ySizeVoxels - 1)
+                    {
+                        glVertex3f(minX, maxY, minZ);
+                        glVertex3f(minX, maxY, maxZ);
+                        glVertex3f(maxX, maxY, maxZ);
+                        glVertex3f(maxX, maxY, minZ);
+                    }
+
+                    if (x == 0)
+                    {
+                        glVertex3f(minX, minY, minZ);
+                        glVertex3f(minX, minY, maxZ);
+                        glVertex3f(minX, maxY, maxZ);
+                        glVertex3f(minX, maxY, minZ);
+                    }
+
+                    if (x == image.pixelWidth - 1)
+                    {
+                        glVertex3f(maxX, minY, minZ);
+                        glVertex3f(maxX, maxY, minZ);
+                        glVertex3f(maxX, maxY, maxZ);
+                        glVertex3f(maxX, minY, maxZ);
+                    }
+
+                    if (z == 0)
+                    {
+                        glVertex3f(minX, minY, minZ);
+                        glVertex3f(minX, maxY, minZ);
+                        glVertex3f(maxX, maxY, minZ);
+                        glVertex3f(maxX, minY, minZ);
+                    }
+
+                    if (z == image.pixelHeight - 1)
+                    {
+                        glVertex3f(minX, minY, maxZ);
+                        glVertex3f(maxX, minY, maxZ);
+                        glVertex3f(maxX, maxY, maxZ);
+                        glVertex3f(minX, maxY, maxZ);
+                    }
+                }
+            }
+        }
+
+        glEnd();
+    }
+
     glPopAttrib();
 }
 
@@ -125,7 +546,7 @@ void setProjection(int width, int height) {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     constexpr float nearPlane = 0.001f;
-    constexpr float farPlane = 100.0f;
+    constexpr float farPlane = 1000.0f;
     constexpr float fieldOfView = 45.0f * 3.14159265f / 180.0f;
     const float top = nearPlane * std::tan(fieldOfView / 2.0f);
     const float right = top * aspect;

@@ -160,9 +160,15 @@ void drawEditorPanel(AppState& state) {
                 static float scaleFactor = 1.0f;
 
                 if (ImGui::Button("Depth Transform")) {
-                    extractDepth(image, scaleFactor);
-                }
+                    
+                    DepthMap depth = extractDepth(&image, scaleFactor);
 
+                    if (!depth.values.empty()) {
+                        image.depthMap = std::move(depth);
+                        image.hasDepthMap = true;
+                    }
+
+                }
                 ImGui::SameLine();
 
                 ImGui::SetNextItemWidth(60.0f);

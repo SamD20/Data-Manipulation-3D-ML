@@ -10,6 +10,20 @@ namespace app {
 
 inline constexpr float voxelSpacingWorldUnits = 0.01f;
 
+struct DepthRenderScale {
+    float minDepth = 0.0f;
+    float maxDepth = 0.0f;
+    float uniformScale = 1.0f;
+    bool valid = false;
+};
+
+struct DepthMap
+{
+    int width = 0;
+    int height = 0;
+    std::vector<float> values;
+};
+
 struct DataPoint {
     float x = 0.0f;
     float y = 0.0f;
@@ -37,6 +51,8 @@ struct ImageLayer {
     std::vector<std::uint8_t> rgbaPixels;
     std::vector<std::uint16_t> scalarPixels;
     std::string name;
+    DepthMap depthMap;
+    bool hasDepthMap = false;
 };
 
 struct ImageLayerSnapshot {
