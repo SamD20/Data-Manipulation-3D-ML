@@ -1,0 +1,7 @@
+{
+  "name": "my-opencv-project",
+  "version-string": "1.0.0",
+  "dependencies": [
+    { "name": "opencv4", "default-features": true }
+  ]
+}
