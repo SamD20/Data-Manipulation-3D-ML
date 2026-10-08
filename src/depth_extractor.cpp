@@ -44,10 +44,17 @@ DepthMap extractDepthFromTiff(const ImageLayer* imgInput, float scaleFactor)
         return {};
     }
 
-    auto [scalarMinIt, scalarMaxIt] =
-    std::minmax_element(
-        imgInput->scalarPixels.begin(),
-        imgInput->scalarPixels.end());
+    double scalarMin = std::numeric_limits<double>::infinity();
+    double scalarMax = -std::numeric_limits<double>::infinity();
+
+    for (double value : imgInput->scalarPixels)
+    {
+        if (!std::isfinite(value))
+            continue;
+
+        scalarMin = std::min(scalarMin, value);
+        scalarMax = std::max(scalarMax, value);
+    }
 
     result.values.resize(pixelCount);
 

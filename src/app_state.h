@@ -53,6 +53,8 @@ struct ImageLayer {
     std::string name;
     DepthMap depthMap;
     bool hasDepthMap = false;
+    bool hasNoData = false;
+    double noDataValue = 0.0;
 };
 
 struct ImageLayerSnapshot {

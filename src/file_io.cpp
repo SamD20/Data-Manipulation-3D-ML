@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <limits>
 #include <commdlg.h>
 #include <wincodec.h>
 #endif
@@ -52,6 +53,9 @@ bool readTiffScalars(const std::string& path, std::vector<Scalar>& values,
         return false;
     }
 
+    int hasNoData = 0;
+    const double noDataValue = GDALGetRasterNoDataValue(band, &hasNoData);
+
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     values.resize(pixelCount);
@@ -65,6 +69,14 @@ bool readTiffScalars(const std::string& path, std::vector<Scalar>& values,
         error = "GDAL could not read TIFF raster values";
         GDALClose(dataset);
         return false;
+    }
+
+    if (hasNoData) {
+    for (double& value : values) {
+        if (value == noDataValue) {
+            value = std::numeric_limits<double>::quiet_NaN();
+        }
+    }
     }
 
     GDALClose(dataset);
