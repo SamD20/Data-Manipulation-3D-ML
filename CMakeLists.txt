@@ -7,9 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenCV REQUIRED)
+find_package(GDAL CONFIG REQUIRED)
 
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV include directories: ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "GDAL version: ${GDAL_VERSION}")
 
 include(FetchContent)
 
@@ -59,10 +61,13 @@ FetchContent_GetProperties(imgui)
 
 if (NOT imgui_POPULATED)
     cmake_policy(PUSH)
+
     if (POLICY CMP0169)
         cmake_policy(SET CMP0169 OLD)
     endif()
+
     FetchContent_Populate(imgui)
+
     cmake_policy(POP)
 endif()
 
@@ -92,6 +97,14 @@ add_executable(opengl_data_app
     src/depth_extractor.cpp
 )
 
+set_target_properties(opengl_data_app PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${PROJECT_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${PROJECT_SOURCE_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${PROJECT_SOURCE_DIR}/bin"
+)
+
 target_compile_definitions(opengl_data_app PRIVATE
     GLFW_INCLUDE_NONE
 )
@@ -104,6 +117,7 @@ target_link_libraries(opengl_data_app PRIVATE
     glfw
     imgui
     hdf5-static
+    GDAL::GDAL
     ${OpenCV_LIBS}
 )
 
@@ -120,6 +134,7 @@ elseif(APPLE)
     )
 else()
     find_package(OpenGL REQUIRED)
+
     target_link_libraries(opengl_data_app PRIVATE
         OpenGL::GL
     )
@@ -137,13 +152,3 @@ else()
         -Wpedantic
     )
 endif()
-
-add_custom_target(package_executable
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${PROJECT_SOURCE_DIR}/bin"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:opengl_data_app>"
-        "${PROJECT_SOURCE_DIR}/bin/$<TARGET_FILE_NAME:opengl_data_app>"
-    DEPENDS opengl_data_app
-    COMMENT "Packaging the application executable"
-)

@@ -49,7 +49,7 @@ struct ImageLayer {
     float sizeZ = 0.0f;
     bool visible = true;
     std::vector<std::uint8_t> rgbaPixels;
-    std::vector<std::uint16_t> scalarPixels;
+    std::vector<double> scalarPixels;
     std::string name;
     DepthMap depthMap;
     bool hasDepthMap = false;

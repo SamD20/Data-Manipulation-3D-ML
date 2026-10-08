@@ -10,73 +10,137 @@
 #include <GL/gl.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace app {
 namespace {
 
-constexpr float depthMapMaxHeight = 1.0f;
+constexpr int maxMeshSamples = 768;
 
-struct DepthRenderScale
-{
-    float minDepth = 0.0f;
-    float maxDepth = 0.0f;
-    float yScale = 0.0f;
-    bool valid = false;
+struct DepthMesh {
+    GLuint list = 0;
+    bool built = false;
+    const float* data = nullptr;
+    std::uint64_t hash = 0;
+    std::array<float, 8> params{};
 };
 
-DepthRenderScale calculateDepthRenderScale(const AppState& state)
-{
-    DepthRenderScale result;
+std::vector<DepthMesh> depthMeshes;
 
-    bool foundDepth = false;
+float layerHeight(const ImageLayer& image) {
+    return std::max(1.0f, std::round(image.sizeY)) * voxelSpacingWorldUnits;
+}
 
-    for (std::size_t layerIndex = 0;
-         layerIndex < state.activeImageCount;
-         ++layerIndex)
-    {
-        const ImageLayer& image = state.imageLayers[layerIndex];
+std::uint64_t sampleHash(const std::vector<float>& values) {
+    std::uint64_t hash = values.size();
+    for (std::size_t k = 0; k < 256 && !values.empty(); ++k) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &values[(values.size() - 1) * k / 255], sizeof(bits));
+        hash = (hash ^ bits) * 1099511628211ull;
+    }
+    return hash;
+}
 
-        if (!image.hasDepthMap)
-            continue;
+void emitDepthMesh(const ImageLayer& image) {
+    const DepthMap& depth = image.depthMap;
+    const float width = image.sizeX * voxelSpacingWorldUnits;
+    const float length = image.sizeZ * voxelSpacingWorldUnits;
+    const float height = layerHeight(image);
+    const float invW = 1.0f / static_cast<float>(depth.width - 1);
+    const float invH = 1.0f / static_cast<float>(depth.height - 1);
+    const int step = std::max(1, std::max(depth.width, depth.height) / maxMeshSamples);
 
-        for (float value : image.depthMap.values)
-        {
-            if (!std::isfinite(value))
+    auto at = [&](int x, int z) { return depth.values[static_cast<std::size_t>(z) * depth.width + x]; };
+    auto vertex = [&](int x, int z) {
+        const float u = static_cast<float>(x) * invW;
+        const float v = static_cast<float>(z) * invH;
+        glTexCoord2f(u, v);
+        glVertex3f(image.x + (u - 0.5f) * width, image.y + at(x, z) * height, image.z + (v - 0.5f) * length);
+    };
+
+    glBegin(GL_TRIANGLES);
+    for (int z = 0; z < depth.height - 1; z += step) {
+        const int zn = std::min(z + step, depth.height - 1);
+        for (int x = 0; x < depth.width - 1; x += step) {
+            const int xn = std::min(x + step, depth.width - 1);
+            if (!std::isfinite(at(x, z)) || !std::isfinite(at(xn, z)) ||
+                !std::isfinite(at(x, zn)) || !std::isfinite(at(xn, zn))) {
                 continue;
-
-            if (!foundDepth)
-            {
-                result.minDepth = value;
-                result.maxDepth = value;
-                foundDepth = true;
             }
-            else
-            {
-                result.minDepth =
-                    std::min(result.minDepth, value);
-
-                result.maxDepth =
-                    std::max(result.maxDepth, value);
-            }
+            vertex(x, z);
+            vertex(xn, z);
+            vertex(xn, zn);
+            vertex(x, z);
+            vertex(xn, zn);
+            vertex(x, zn);
         }
     }
+    glEnd();
+}
 
-    if (!foundDepth)
-        return result;
-
-    result.valid = true;
-
-    const float depthRange =
-        result.maxDepth - result.minDepth;
-
-    if (depthRange > 0.0f)
-    {
-        result.yScale =
-            depthMapMaxHeight / depthRange;
+bool drawDepthLayer(const ImageLayer& image, DepthMesh& mesh) {
+    const DepthMap& depth = image.depthMap;
+    if (depth.width < 2 || depth.height < 2 ||
+        depth.values.size() < static_cast<std::size_t>(depth.width) * static_cast<std::size_t>(depth.height)) {
+        return false;
     }
 
-    return result;
+    const std::uint64_t hash = sampleHash(depth.values);
+    const std::array<float, 8> params = {image.x, image.y, image.z, image.sizeX, image.sizeY, image.sizeZ,
+                                         static_cast<float>(depth.width), static_cast<float>(depth.height)};
+    if (!mesh.built || mesh.data != depth.values.data() || mesh.hash != hash || mesh.params != params) {
+        if (mesh.list == 0) mesh.list = glGenLists(1);
+        glNewList(mesh.list, GL_COMPILE);
+        emitDepthMesh(image);
+        glEndList();
+        mesh.built = true;
+        mesh.data = depth.values.data();
+        mesh.hash = hash;
+        mesh.params = params;
+    }
+    glCallList(mesh.list);
+    return true;
+}
+
+void drawImagePlane(const ImageLayer& image) {
+    const float halfX = image.sizeX * voxelSpacingWorldUnits * 0.5f;
+    const float halfZ = image.sizeZ * voxelSpacingWorldUnits * 0.5f;
+    const float x0 = image.x - halfX, x1 = image.x + halfX;
+    const float z0 = image.z - halfZ, z1 = image.z + halfZ;
+    const float y0 = image.y, y1 = image.y + layerHeight(image);
+
+    auto vertex = [](float u, float v, float x, float y, float z) {
+        glTexCoord2f(u, v);
+        glVertex3f(x, y, z);
+    };
+
+    glBegin(GL_QUADS);
+    for (float y : {y0, y1}) {
+        vertex(0, 0, x0, y, z0);
+        vertex(1, 0, x1, y, z0);
+        vertex(1, 1, x1, y, z1);
+        vertex(0, 1, x0, y, z1);
+    }
+    for (float v : {0.0f, 1.0f}) {
+        const float z = v == 0.0f ? z0 : z1;
+        vertex(0, v, x0, y0, z);
+        vertex(1, v, x1, y0, z);
+        vertex(1, v, x1, y1, z);
+        vertex(0, v, x0, y1, z);
+    }
+    for (float u : {0.0f, 1.0f}) {
+        const float x = u == 0.0f ? x0 : x1;
+        vertex(u, 0, x, y0, z0);
+        vertex(u, 1, x, y0, z1);
+        vertex(u, 1, x, y1, z1);
+        vertex(u, 0, x, y1, z0);
+    }
+    glEnd();
 }
 
 void drawDataPoint() {
@@ -86,30 +150,27 @@ void drawDataPoint() {
     };
     constexpr int faces[6][4] = {{0, 1, 2, 3}, {4, 7, 6, 5}, {0, 4, 5, 1},
                                  {1, 5, 6, 2}, {2, 6, 7, 3}, {4, 0, 3, 7}};
-    constexpr float normals[6][3] = {{0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, 1.0f},
-                                     {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f},
-                                     {0.0f, 1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}};
+    constexpr float normals[6][3] = {{0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {1, 0, 0}, {0, 1, 0}, {-1, 0, 0}};
     glBegin(GL_QUADS);
     for (int face = 0; face < 6; ++face) {
         glNormal3fv(normals[face]);
         glColor3f(0.78f, 0.39f, 0.23f);
-        for (int corner = 0; corner < 4; ++corner) {
-            glVertex3fv(vertices[faces[face][3 - corner]]);
-        }
+        for (int corner = 3; corner >= 0; --corner) glVertex3fv(vertices[faces[face][corner]]);
     }
     glEnd();
 }
 
 void drawSelectionOutline() {
-    constexpr float size = 1.015f;
+    constexpr float s = 1.015f;
     constexpr float corners[8][3] = {
-        {-size, -size, -size}, {size, -size, -size}, {size, size, -size}, {-size, size, -size},
-        {-size, -size, size}, {size, -size, size}, {size, size, size}, {-size, size, size}
+        {-s, -s, -s}, {s, -s, -s}, {s, s, -s}, {-s, s, -s},
+        {-s, -s, s},  {s, -s, s},  {s, s, s},  {-s, s, s}
     };
     constexpr int edges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
                                   {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT);
     glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
     glLineWidth(2.0f);
     glColor3f(1.0f, 0.82f, 0.25f);
     glBegin(GL_LINES);
@@ -126,6 +187,7 @@ void drawInfiniteGrid(const AppState& state) {
     constexpr float floorY = -0.01f;
     const float centerX = std::floor(state.cameraX);
     const float centerZ = std::floor(state.cameraZ);
+    auto shade = [](float v) { return std::fmod(std::abs(v), 10.0f) < 0.01f ? 0.30f : 0.17f; };
 
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
     glDisable(GL_LIGHTING);
@@ -133,17 +195,15 @@ void drawInfiniteGrid(const AppState& state) {
     for (int offset = -extent; offset <= extent; ++offset) {
         const float lineX = centerX + static_cast<float>(offset);
         const float lineZ = centerZ + static_cast<float>(offset);
-        const float shadeX = std::fmod(std::abs(lineX), 10.0f) < 0.01f ? 0.30f : 0.17f;
-        const float shadeZ = std::fmod(std::abs(lineZ), 10.0f) < 0.01f ? 0.30f : 0.17f;
         if (std::abs(lineX) > 0.01f) {
-            glColor3f(shadeX, shadeX, shadeX);
-            glVertex3f(lineX, floorY, centerZ - static_cast<float>(extent));
-            glVertex3f(lineX, floorY, centerZ + static_cast<float>(extent));
+            glColor3f(shade(lineX), shade(lineX), shade(lineX));
+            glVertex3f(lineX, floorY, centerZ - extent);
+            glVertex3f(lineX, floorY, centerZ + extent);
         }
         if (std::abs(lineZ) > 0.01f) {
-            glColor3f(shadeZ, shadeZ, shadeZ);
-            glVertex3f(centerX - static_cast<float>(extent), floorY, lineZ);
-            glVertex3f(centerX + static_cast<float>(extent), floorY, lineZ);
+            glColor3f(shade(lineZ), shade(lineZ), shade(lineZ));
+            glVertex3f(centerX - extent, floorY, lineZ);
+            glVertex3f(centerX + extent, floorY, lineZ);
         }
     }
     glColor3f(0.78f, 0.24f, 0.20f);
@@ -156,386 +216,41 @@ void drawInfiniteGrid(const AppState& state) {
     glPopAttrib();
 }
 
-void drawDepthImage(const ImageLayer& image, const DepthRenderScale& scale)
-{
-    const DepthMap& depth = image.depthMap;
-
-    if (depth.width <= 0 ||
-        depth.height <= 0 ||
-        depth.values.empty())
-    {
-        return;
+void drawImageLayers(const AppState& state) {
+    while (depthMeshes.size() > state.activeImageCount) {
+        if (depthMeshes.back().list != 0) glDeleteLists(depthMeshes.back().list, 1);
+        depthMeshes.pop_back();
     }
+    depthMeshes.resize(state.activeImageCount);
 
-    const float width =
-        image.sizeX * voxelSpacingWorldUnits;
-
-    const float depthSize =
-        image.sizeZ * voxelSpacingWorldUnits;
-
-    const float xSpacing =
-        width /
-        static_cast<float>(std::max(1, depth.width - 1));
-
-    const float zSpacing =
-        depthSize /
-        static_cast<float>(std::max(1, depth.height - 1));
-
-    const float depthRange =
-        scale.maxDepth - scale.minDepth;
-
-    const float yScale =
-        std::max(1.0f, image.sizeY);
-
-    glPushAttrib(
-        GL_ENABLE_BIT |
-        GL_TEXTURE_BIT |
-        GL_CURRENT_BIT |
-        GL_COLOR_BUFFER_BIT
-    );
-
+    glPushAttrib(GL_ENABLE_BIT | GL_TEXTURE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT);
     glDisable(GL_LIGHTING);
     glDisable(GL_CULL_FACE);
     glEnable(GL_TEXTURE_2D);
     glEnable(GL_BLEND);
-
+    glEnable(GL_ALPHA_TEST);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glAlphaFunc(GL_GREATER, 0.0f);
 
-    glBindTexture(GL_TEXTURE_2D, image.texture);
+    for (std::size_t index = 0; index < state.activeImageCount; ++index) {
+        const ImageLayer& image = state.imageLayers[index];
+        if (!image.visible || image.texture == 0) continue;
 
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        glBindTexture(GL_TEXTURE_2D, image.texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-    for (int z = 0; z < depth.height - 1; ++z)
-    {
-        for (int x = 0; x < depth.width - 1; ++x)
-        {
-            const int i00 =
-                z * depth.width + x;
+        if (!image.hasDepthMap || !drawDepthLayer(image, depthMeshes[index])) drawImagePlane(image);
 
-            const int i10 =
-                i00 + 1;
-
-            const int i01 =
-                (z + 1) * depth.width + x;
-
-            const int i11 =
-                i01 + 1;
-
-            const float x0 =
-                image.x +
-                (static_cast<float>(x) -
-                 static_cast<float>(depth.width - 1) * 0.5f) *
-                xSpacing;
-
-            const float x1 =
-                image.x +
-                (static_cast<float>(x + 1) -
-                 static_cast<float>(depth.width - 1) * 0.5f) *
-                xSpacing;
-
-            const float z0 =
-                image.z +
-                (static_cast<float>(z) -
-                 static_cast<float>(depth.height - 1) * 0.5f) *
-                zSpacing;
-
-            const float z1 =
-                image.z +
-                (static_cast<float>(z + 1) -
-                 static_cast<float>(depth.height - 1) * 0.5f) *
-                zSpacing;
-
-            float d00 = 0.0f;
-            float d10 = 0.0f;
-            float d01 = 0.0f;
-            float d11 = 0.0f;
-
-            if (depthRange > 0.0f)
-            {
-                d00 =
-                    (depth.values[i00] - scale.minDepth) /
-                    depthRange;
-
-                d10 =
-                    (depth.values[i10] - scale.minDepth) /
-                    depthRange;
-
-                d01 =
-                    (depth.values[i01] - scale.minDepth) /
-                    depthRange;
-
-                d11 =
-                    (depth.values[i11] - scale.minDepth) /
-                    depthRange;
-            }
-
-            d00 = std::clamp(d00, 0.0f, 1.0f);
-            d10 = std::clamp(d10, 0.0f, 1.0f);
-            d01 = std::clamp(d01, 0.0f, 1.0f);
-            d11 = std::clamp(d11, 0.0f, 1.0f);
-
-            const float y00 =
-                image.y +
-                d00 *
-                depthMapMaxHeight *
-                yScale;
-
-            const float y10 =
-                image.y +
-                d10 *
-                depthMapMaxHeight *
-                yScale;
-
-            const float y01 =
-                image.y +
-                d01 *
-                depthMapMaxHeight *
-                yScale;
-
-            const float y11 =
-                image.y +
-                d11 *
-                depthMapMaxHeight *
-                yScale;
-
-            const float u0 =
-                static_cast<float>(x) /
-                static_cast<float>(depth.width - 1);
-
-            const float u1 =
-                static_cast<float>(x + 1) /
-                static_cast<float>(depth.width - 1);
-
-            const float v0 =
-                static_cast<float>(z) /
-                static_cast<float>(depth.height - 1);
-
-            const float v1 =
-                static_cast<float>(z + 1) /
-                static_cast<float>(depth.height - 1);
-
-            glBegin(GL_TRIANGLES);
-
-            glTexCoord2f(u0, v0);
-            glVertex3f(x0, y00, z0);
-
-            glTexCoord2f(u1, v0);
-            glVertex3f(x1, y10, z0);
-
-            glTexCoord2f(u1, v1);
-            glVertex3f(x1, y11, z1);
-
-            glTexCoord2f(u0, v0);
-            glVertex3f(x0, y00, z0);
-
-            glTexCoord2f(u1, v1);
-            glVertex3f(x1, y11, z1);
-
-            glTexCoord2f(u0, v1);
-            glVertex3f(x0, y01, z1);
-
-            glEnd();
+        if (static_cast<int>(index) == state.selectedImage) {
+            const float height = layerHeight(image);
+            glPushMatrix();
+            glTranslatef(image.x, image.y + height * 0.5f, image.z);
+            glScalef(image.sizeX * voxelSpacingWorldUnits * 0.5f, height * 0.5f, image.sizeZ * voxelSpacingWorldUnits * 0.5f);
+            drawSelectionOutline();
+            glPopMatrix();
         }
-    }
-
-    glPopAttrib();
-}
-
-void drawImageLayers(const AppState& state)
-{
-    const DepthRenderScale depthScale =
-        calculateDepthRenderScale(state);
-
-    glPushAttrib(
-        GL_ENABLE_BIT |
-        GL_TEXTURE_BIT |
-        GL_CURRENT_BIT |
-        GL_COLOR_BUFFER_BIT
-    );
-
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_TEXTURE_2D);
-    glEnable(GL_BLEND);
-
-    glBlendFunc(
-        GL_SRC_ALPHA,
-        GL_ONE_MINUS_SRC_ALPHA
-    );
-
-    for (std::size_t index = 0;
-         index < state.activeImageCount;
-         ++index)
-    {
-        const ImageLayer& image =
-            state.imageLayers[index];
-
-        if (!image.visible)
-            continue;
-
-        if (image.hasDepthMap && depthScale.valid)
-        {
-            drawDepthImage(
-                image,
-                depthScale
-            );
-
-            continue;
-        }
-
-        if (image.pixelWidth == 0 ||
-            image.pixelHeight == 0 ||
-            image.rgbaPixels.empty())
-        {
-            continue;
-        }
-
-        const float voxelSize =
-            voxelSpacingWorldUnits;
-
-        const int ySizeVoxels =
-            static_cast<int>(
-                std::max(
-                    1.0f,
-                    std::round(image.sizeY)
-                )
-            );
-
-        const float startX =
-            image.x -
-            static_cast<float>(image.pixelWidth) *
-            voxelSize * 0.5f;
-
-        const float startZ =
-            image.z -
-            static_cast<float>(image.pixelHeight) *
-            voxelSize * 0.5f;
-
-        glBegin(GL_QUADS);
-
-        for (std::uint32_t z = 0;
-             z < image.pixelHeight;
-             ++z)
-        {
-            for (std::uint32_t x = 0;
-                 x < image.pixelWidth;
-                 ++x)
-            {
-                const std::size_t pixelIndex =
-                    (
-                        static_cast<std::size_t>(z) *
-                        image.pixelWidth +
-                        x
-                    ) * 4;
-
-                if (pixelIndex + 3 >=
-                    image.rgbaPixels.size())
-                {
-                    continue;
-                }
-
-                const float r =
-                    static_cast<float>(
-                        image.rgbaPixels[pixelIndex]
-                    ) / 255.0f;
-
-                const float g =
-                    static_cast<float>(
-                        image.rgbaPixels[pixelIndex + 1]
-                    ) / 255.0f;
-
-                const float b =
-                    static_cast<float>(
-                        image.rgbaPixels[pixelIndex + 2]
-                    ) / 255.0f;
-
-                const float a =
-                    static_cast<float>(
-                        image.rgbaPixels[pixelIndex + 3]
-                    ) / 255.0f;
-
-                glColor4f(r, g, b, a);
-
-                const float minX =
-                    startX +
-                    static_cast<float>(x) *
-                    voxelSize;
-
-                const float maxX =
-                    minX + voxelSize;
-
-                const float minZ =
-                    startZ +
-                    static_cast<float>(z) *
-                    voxelSize;
-
-                const float maxZ =
-                    minZ + voxelSize;
-
-                for (int yVoxel = 0;
-                     yVoxel < ySizeVoxels;
-                     ++yVoxel)
-                {
-                    const float minY =
-                        image.y +
-                        static_cast<float>(yVoxel) *
-                        voxelSize;
-
-                    const float maxY =
-                        minY + voxelSize;
-
-                    if (yVoxel == 0)
-                    {
-                        glVertex3f(minX, minY, minZ);
-                        glVertex3f(maxX, minY, minZ);
-                        glVertex3f(maxX, minY, maxZ);
-                        glVertex3f(minX, minY, maxZ);
-                    }
-
-                    if (yVoxel == ySizeVoxels - 1)
-                    {
-                        glVertex3f(minX, maxY, minZ);
-                        glVertex3f(minX, maxY, maxZ);
-                        glVertex3f(maxX, maxY, maxZ);
-                        glVertex3f(maxX, maxY, minZ);
-                    }
-
-                    if (x == 0)
-                    {
-                        glVertex3f(minX, minY, minZ);
-                        glVertex3f(minX, minY, maxZ);
-                        glVertex3f(minX, maxY, maxZ);
-                        glVertex3f(minX, maxY, minZ);
-                    }
-
-                    if (x == image.pixelWidth - 1)
-                    {
-                        glVertex3f(maxX, minY, minZ);
-                        glVertex3f(maxX, maxY, minZ);
-                        glVertex3f(maxX, maxY, maxZ);
-                        glVertex3f(maxX, minY, maxZ);
-                    }
-
-                    if (z == 0)
-                    {
-                        glVertex3f(minX, minY, minZ);
-                        glVertex3f(minX, maxY, minZ);
-                        glVertex3f(maxX, maxY, minZ);
-                        glVertex3f(maxX, minY, minZ);
-                    }
-
-                    if (z == image.pixelHeight - 1)
-                    {
-                        glVertex3f(minX, minY, maxZ);
-                        glVertex3f(maxX, minY, maxZ);
-                        glVertex3f(maxX, maxY, maxZ);
-                        glVertex3f(minX, maxY, maxZ);
-                    }
-                }
-            }
-        }
-
-        glEnd();
     }
 
     glPopAttrib();
@@ -543,13 +258,13 @@ void drawImageLayers(const AppState& state)
 
 void setProjection(int width, int height) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height > 0 ? height : 1);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
     constexpr float nearPlane = 0.001f;
     constexpr float farPlane = 1000.0f;
     constexpr float fieldOfView = 45.0f * 3.14159265f / 180.0f;
     const float top = nearPlane * std::tan(fieldOfView / 2.0f);
     const float right = top * aspect;
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
     glFrustum(-right, right, -top, top, nearPlane, farPlane);
     glMatrixMode(GL_MODELVIEW);
 }
@@ -589,6 +304,7 @@ void renderScene(const AppState& state, int width, int height) {
 
     drawInfiniteGrid(state);
     drawImageLayers(state);
+
     for (std::size_t index = 0; index < state.dataPoints.size(); ++index) {
         const DataPoint& point = state.dataPoints[index];
         glPushMatrix();

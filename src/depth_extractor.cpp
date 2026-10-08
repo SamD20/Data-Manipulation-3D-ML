@@ -44,30 +44,26 @@ DepthMap extractDepthFromTiff(const ImageLayer* imgInput, float scaleFactor)
         return {};
     }
 
+    auto [scalarMinIt, scalarMaxIt] =
+    std::minmax_element(
+        imgInput->scalarPixels.begin(),
+        imgInput->scalarPixels.end());
+
     result.values.resize(pixelCount);
 
     for (std::size_t i = 0; i < pixelCount; ++i)
     {
         result.values[i] =
-            static_cast<float>(imgInput->scalarPixels[i])
-            * scaleFactor;
+            static_cast<float>(imgInput->scalarPixels[i] * scaleFactor);
     }
 
-float minValue = result.values[0];
-float maxValue = result.values[0];
+    float minValue = result.values[0];
+    float maxValue = result.values[0];
 
-for (float value : result.values) {
-    minValue = std::min(minValue, value);
-    maxValue = std::max(maxValue, value);
-}
-
-std::cout << "TIFF depth map: "
-          << result.width << " x "
-          << result.height << "\n";
-
-std::cout << "TIFF depth range: "
-          << minValue << " -> "
-          << maxValue << "\n";
+    for (float value : result.values) {
+        minValue = std::min(minValue, value);
+        maxValue = std::max(maxValue, value);
+    }
 
     return result;
 }
